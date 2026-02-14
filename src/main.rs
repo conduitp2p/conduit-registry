@@ -299,7 +299,8 @@ async fn search_listings(
     sql.push_str(" ORDER BY registered_at DESC");
 
     let mut stmt = db.prepare(&sql).unwrap();
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+        bind_values.iter().map(|b| b.as_ref()).collect();
 
     let items: Vec<ContentListing> = stmt
         .query_map(params_ref.as_slice(), |row| {
@@ -444,7 +445,8 @@ async fn discover(
 // ---------------------------------------------------------------------------
 
 async fn dashboard() -> Html<&'static str> {
-    Html(r##"<!DOCTYPE html>
+    Html(
+        r##"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -556,7 +558,8 @@ load();
 setInterval(load, 10000);
 </script>
 </body>
-</html>"##)
+</html>"##,
+    )
 }
 
 // ---------------------------------------------------------------------------
