@@ -1,0 +1,20 @@
+[Unit]
+Description=Conduit Registry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/conduit-registry
+ExecStart=/root/conduit-registry/target/release/conduit-registry \
+  --port 3003 \
+  --db-path /root/registry.sqlite
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=conduit-registry
+
+[Install]
+WantedBy=multi-user.target
