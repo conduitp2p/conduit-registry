@@ -32,7 +32,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: conduit-registry
-      - name: Deploy to registry node
+      - name: Stop service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.REGISTRY_HOST }}
+          username: root
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: systemctl stop conduit-registry || true
+      - name: Upload binary
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.REGISTRY_HOST }}
@@ -41,7 +48,7 @@ jobs:
           source: conduit-registry
           target: /root/conduit-registry/target/release/
           overwrite: true
-      - name: Restart service
+      - name: Start service
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.REGISTRY_HOST }}
@@ -49,6 +56,6 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             chmod +x /root/conduit-registry/target/release/conduit-registry
-            systemctl restart conduit-registry
+            systemctl start conduit-registry
             sleep 3
             systemctl is-active conduit-registry
