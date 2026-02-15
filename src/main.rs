@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use clap::Parser;
 use rusqlite::Connection;
@@ -440,6 +440,22 @@ async fn discover(
     (StatusCode::OK, Json(serde_json::json!(response))).into_response()
 }
 
+/// DELETE /api/listings -- clear all listings (for test re-provisioning)
+async fn delete_all_listings(State(state): State<AppState>) -> impl IntoResponse {
+    let db = state.db.lock().unwrap();
+    let deleted = db.execute("DELETE FROM listings", []).unwrap_or(0);
+    println!("Cleared {} listings", deleted);
+    (StatusCode::OK, Json(serde_json::json!({ "deleted": deleted })))
+}
+
+/// DELETE /api/seeders -- clear all seeder announcements (for test re-provisioning)
+async fn delete_all_seeders(State(state): State<AppState>) -> impl IntoResponse {
+    let db = state.db.lock().unwrap();
+    let deleted = db.execute("DELETE FROM seeders", []).unwrap_or(0);
+    println!("Cleared {} seeder announcements", deleted);
+    (StatusCode::OK, Json(serde_json::json!({ "deleted": deleted })))
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard (HTML)
 // ---------------------------------------------------------------------------
@@ -619,10 +635,10 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(dashboard))
-        .route("/api/listings", post(create_listing).get(list_listings))
+        .route("/api/listings", post(create_listing).get(list_listings).delete(delete_all_listings))
         .route("/api/listings/{content_hash}", get(get_listing))
         .route("/api/search", get(search_listings))
-        .route("/api/seeders", post(create_seeder).get(list_seeders))
+        .route("/api/seeders", post(create_seeder).get(list_seeders).delete(delete_all_seeders))
         .route("/api/discover/{content_hash}", get(discover))
         .layer(cors)
         .with_state(state);
