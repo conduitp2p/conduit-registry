@@ -63,7 +63,14 @@ struct ContentListing {
     creator_pubkey: String,
     creator_address: String,
     creator_ln_address: String,
+    creator_alias: String,
     registered_at: String,
+    #[serde(default)]
+    pre_c1_hex: String,
+    #[serde(default)]
+    pre_c2_hex: String,
+    #[serde(default)]
+    pre_pk_creator_hex: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,6 +79,7 @@ struct SeederAnnouncement {
     seeder_pubkey: String,
     seeder_address: String,
     seeder_ln_address: String,
+    seeder_alias: String,
     transport_price: u64,
     chunk_count: u64,
     announced_at: String,
@@ -111,6 +119,7 @@ fn init_db(conn: &Connection) {
             creator_pubkey TEXT NOT NULL,
             creator_address TEXT NOT NULL,
             creator_ln_address TEXT NOT NULL,
+            creator_alias TEXT NOT NULL DEFAULT '',
             registered_at TEXT NOT NULL
         );
 
@@ -119,6 +128,7 @@ fn init_db(conn: &Connection) {
             seeder_pubkey TEXT NOT NULL,
             seeder_address TEXT NOT NULL,
             seeder_ln_address TEXT NOT NULL,
+            seeder_alias TEXT NOT NULL DEFAULT '',
             transport_price INTEGER NOT NULL,
             chunk_count INTEGER NOT NULL DEFAULT 0,
             announced_at TEXT NOT NULL,
@@ -130,11 +140,62 @@ fn init_db(conn: &Connection) {
         ",
     )
     .expect("Failed to initialize database schema");
+
+    // Migration: add alias columns to existing databases
+    let _ = conn.execute(
+        "ALTER TABLE listings ADD COLUMN creator_alias TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE seeders ADD COLUMN seeder_alias TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    // Migration: add PRE columns
+    let _ = conn.execute(
+        "ALTER TABLE listings ADD COLUMN pre_c1_hex TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE listings ADD COLUMN pre_c2_hex TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE listings ADD COLUMN pre_pk_creator_hex TEXT NOT NULL DEFAULT ''",
+        [],
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+fn listing_from_row(row: &rusqlite::Row) -> rusqlite::Result<ContentListing> {
+    Ok(ContentListing {
+        content_hash: row.get(0)?,
+        encrypted_hash: row.get(1)?,
+        file_name: row.get(2)?,
+        size_bytes: row.get(3)?,
+        price_sats: row.get(4)?,
+        chunk_size: row.get(5)?,
+        chunk_count: row.get(6)?,
+        plaintext_root: row.get(7)?,
+        encrypted_root: row.get(8)?,
+        creator_pubkey: row.get(9)?,
+        creator_address: row.get(10)?,
+        creator_ln_address: row.get(11)?,
+        creator_alias: row.get(12)?,
+        registered_at: row.get(13)?,
+        pre_c1_hex: row.get(14)?,
+        pre_c2_hex: row.get(15)?,
+        pre_pk_creator_hex: row.get(16)?,
+    })
+}
+
+const LISTING_COLS: &str =
+    "content_hash, encrypted_hash, file_name, size_bytes, price_sats,
+     chunk_size, chunk_count, plaintext_root, encrypted_root,
+     creator_pubkey, creator_address, creator_ln_address, creator_alias, registered_at,
+     pre_c1_hex, pre_c2_hex, pre_pk_creator_hex";
 
 /// POST /api/listings -- creator publishes a content listing
 async fn create_listing(
@@ -146,8 +207,9 @@ async fn create_listing(
         "INSERT OR REPLACE INTO listings
          (content_hash, encrypted_hash, file_name, size_bytes, price_sats,
           chunk_size, chunk_count, plaintext_root, encrypted_root,
-          creator_pubkey, creator_address, creator_ln_address, registered_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+          creator_pubkey, creator_address, creator_ln_address, creator_alias, registered_at,
+          pre_c1_hex, pre_c2_hex, pre_pk_creator_hex)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         rusqlite::params![
             listing.content_hash,
             listing.encrypted_hash,
@@ -161,7 +223,11 @@ async fn create_listing(
             listing.creator_pubkey,
             listing.creator_address,
             listing.creator_ln_address,
+            listing.creator_alias,
             listing.registered_at,
+            listing.pre_c1_hex,
+            listing.pre_c2_hex,
+            listing.pre_pk_creator_hex,
         ],
     );
 
@@ -186,33 +252,11 @@ async fn create_listing(
 /// GET /api/listings -- list all content listings
 async fn list_listings(State(state): State<AppState>) -> impl IntoResponse {
     let db = state.db.lock().unwrap();
-    let mut stmt = db
-        .prepare(
-            "SELECT content_hash, encrypted_hash, file_name, size_bytes, price_sats,
-                    chunk_size, chunk_count, plaintext_root, encrypted_root,
-                    creator_pubkey, creator_address, creator_ln_address, registered_at
-             FROM listings ORDER BY registered_at DESC",
-        )
-        .unwrap();
+    let sql = format!("SELECT {} FROM listings ORDER BY registered_at DESC", LISTING_COLS);
+    let mut stmt = db.prepare(&sql).unwrap();
 
     let items: Vec<ContentListing> = stmt
-        .query_map([], |row| {
-            Ok(ContentListing {
-                content_hash: row.get(0)?,
-                encrypted_hash: row.get(1)?,
-                file_name: row.get(2)?,
-                size_bytes: row.get(3)?,
-                price_sats: row.get(4)?,
-                chunk_size: row.get(5)?,
-                chunk_count: row.get(6)?,
-                plaintext_root: row.get(7)?,
-                encrypted_root: row.get(8)?,
-                creator_pubkey: row.get(9)?,
-                creator_address: row.get(10)?,
-                creator_ln_address: row.get(11)?,
-                registered_at: row.get(12)?,
-            })
-        })
+        .query_map([], listing_from_row)
         .unwrap()
         .filter_map(|r| r.ok())
         .collect();
@@ -226,30 +270,8 @@ async fn get_listing(
     Path(content_hash): Path<String>,
 ) -> impl IntoResponse {
     let db = state.db.lock().unwrap();
-    let result = db.query_row(
-        "SELECT content_hash, encrypted_hash, file_name, size_bytes, price_sats,
-                chunk_size, chunk_count, plaintext_root, encrypted_root,
-                creator_pubkey, creator_address, creator_ln_address, registered_at
-         FROM listings WHERE content_hash = ?1",
-        rusqlite::params![content_hash],
-        |row| {
-            Ok(ContentListing {
-                content_hash: row.get(0)?,
-                encrypted_hash: row.get(1)?,
-                file_name: row.get(2)?,
-                size_bytes: row.get(3)?,
-                price_sats: row.get(4)?,
-                chunk_size: row.get(5)?,
-                chunk_count: row.get(6)?,
-                plaintext_root: row.get(7)?,
-                encrypted_root: row.get(8)?,
-                creator_pubkey: row.get(9)?,
-                creator_address: row.get(10)?,
-                creator_ln_address: row.get(11)?,
-                registered_at: row.get(12)?,
-            })
-        },
-    );
+    let sql = format!("SELECT {} FROM listings WHERE content_hash = ?1", LISTING_COLS);
+    let result = db.query_row(&sql, rusqlite::params![content_hash], listing_from_row);
 
     match result {
         Ok(listing) => (StatusCode::OK, Json(serde_json::json!(listing))).into_response(),
@@ -269,12 +291,7 @@ async fn search_listings(
     let db = state.db.lock().unwrap();
 
     // Build dynamic query
-    let mut sql = String::from(
-        "SELECT content_hash, encrypted_hash, file_name, size_bytes, price_sats,
-                chunk_size, chunk_count, plaintext_root, encrypted_root,
-                creator_pubkey, creator_address, creator_ln_address, registered_at
-         FROM listings WHERE 1=1",
-    );
+    let mut sql = format!("SELECT {} FROM listings WHERE 1=1", LISTING_COLS);
     let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut param_idx = 1;
 
@@ -303,23 +320,7 @@ async fn search_listings(
         bind_values.iter().map(|b| b.as_ref()).collect();
 
     let items: Vec<ContentListing> = stmt
-        .query_map(params_ref.as_slice(), |row| {
-            Ok(ContentListing {
-                content_hash: row.get(0)?,
-                encrypted_hash: row.get(1)?,
-                file_name: row.get(2)?,
-                size_bytes: row.get(3)?,
-                price_sats: row.get(4)?,
-                chunk_size: row.get(5)?,
-                chunk_count: row.get(6)?,
-                plaintext_root: row.get(7)?,
-                encrypted_root: row.get(8)?,
-                creator_pubkey: row.get(9)?,
-                creator_address: row.get(10)?,
-                creator_ln_address: row.get(11)?,
-                registered_at: row.get(12)?,
-            })
-        })
+        .query_map(params_ref.as_slice(), listing_from_row)
         .unwrap()
         .filter_map(|r| r.ok())
         .collect();
@@ -335,14 +336,15 @@ async fn create_seeder(
     let db = state.db.lock().unwrap();
     let result = db.execute(
         "INSERT OR REPLACE INTO seeders
-         (encrypted_hash, seeder_pubkey, seeder_address, seeder_ln_address,
+         (encrypted_hash, seeder_pubkey, seeder_address, seeder_ln_address, seeder_alias,
           transport_price, chunk_count, announced_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             announcement.encrypted_hash,
             announcement.seeder_pubkey,
             announcement.seeder_address,
             announcement.seeder_ln_address,
+            announcement.seeder_alias,
             announcement.transport_price,
             announcement.chunk_count,
             announcement.announced_at,
@@ -375,30 +377,8 @@ async fn discover(
     let db = state.db.lock().unwrap();
 
     // Get the listing
-    let listing_result = db.query_row(
-        "SELECT content_hash, encrypted_hash, file_name, size_bytes, price_sats,
-                chunk_size, chunk_count, plaintext_root, encrypted_root,
-                creator_pubkey, creator_address, creator_ln_address, registered_at
-         FROM listings WHERE content_hash = ?1",
-        rusqlite::params![content_hash],
-        |row| {
-            Ok(ContentListing {
-                content_hash: row.get(0)?,
-                encrypted_hash: row.get(1)?,
-                file_name: row.get(2)?,
-                size_bytes: row.get(3)?,
-                price_sats: row.get(4)?,
-                chunk_size: row.get(5)?,
-                chunk_count: row.get(6)?,
-                plaintext_root: row.get(7)?,
-                encrypted_root: row.get(8)?,
-                creator_pubkey: row.get(9)?,
-                creator_address: row.get(10)?,
-                creator_ln_address: row.get(11)?,
-                registered_at: row.get(12)?,
-            })
-        },
-    );
+    let sql = format!("SELECT {} FROM listings WHERE content_hash = ?1", LISTING_COLS);
+    let listing_result = db.query_row(&sql, rusqlite::params![content_hash], listing_from_row);
 
     let listing = match listing_result {
         Ok(l) => l,
@@ -414,7 +394,7 @@ async fn discover(
     // Get all seeders for this content's encrypted_hash
     let mut stmt = db
         .prepare(
-            "SELECT encrypted_hash, seeder_pubkey, seeder_address, seeder_ln_address,
+            "SELECT encrypted_hash, seeder_pubkey, seeder_address, seeder_ln_address, seeder_alias,
                     transport_price, chunk_count, announced_at
              FROM seeders WHERE encrypted_hash = ?1",
         )
@@ -427,9 +407,10 @@ async fn discover(
                 seeder_pubkey: row.get(1)?,
                 seeder_address: row.get(2)?,
                 seeder_ln_address: row.get(3)?,
-                transport_price: row.get(4)?,
-                chunk_count: row.get(5)?,
-                announced_at: row.get(6)?,
+                seeder_alias: row.get(4)?,
+                transport_price: row.get(5)?,
+                chunk_count: row.get(6)?,
+                announced_at: row.get(7)?,
             })
         })
         .unwrap()
@@ -586,7 +567,7 @@ async fn list_seeders(State(state): State<AppState>) -> impl IntoResponse {
     let db = state.db.lock().unwrap();
     let mut stmt = db
         .prepare(
-            "SELECT encrypted_hash, seeder_pubkey, seeder_address, seeder_ln_address,
+            "SELECT encrypted_hash, seeder_pubkey, seeder_address, seeder_ln_address, seeder_alias,
                     transport_price, chunk_count, announced_at
              FROM seeders ORDER BY announced_at DESC",
         )
@@ -599,9 +580,10 @@ async fn list_seeders(State(state): State<AppState>) -> impl IntoResponse {
                 seeder_pubkey: row.get(1)?,
                 seeder_address: row.get(2)?,
                 seeder_ln_address: row.get(3)?,
-                transport_price: row.get(4)?,
-                chunk_count: row.get(5)?,
-                announced_at: row.get(6)?,
+                seeder_alias: row.get(4)?,
+                transport_price: row.get(5)?,
+                chunk_count: row.get(6)?,
+                announced_at: row.get(7)?,
             })
         })
         .unwrap()
