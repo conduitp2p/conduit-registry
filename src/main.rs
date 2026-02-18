@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
 use rusqlite::Connection;
@@ -71,6 +71,12 @@ struct ContentListing {
     pre_c2_hex: String,
     #[serde(default)]
     pre_pk_creator_hex: String,
+    #[serde(default = "default_playback_policy")]
+    playback_policy: String,
+}
+
+fn default_playback_policy() -> String {
+    "open".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,6 +89,18 @@ struct SeederAnnouncement {
     transport_price: u64,
     chunk_count: u64,
     announced_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Manufacturer {
+    pk_hex: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    website: String,
+    #[serde(default)]
+    registered_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +181,21 @@ fn init_db(conn: &Connection) {
         "ALTER TABLE listings ADD COLUMN pre_pk_creator_hex TEXT NOT NULL DEFAULT ''",
         [],
     );
+    // Migration: add playback_policy column
+    let _ = conn.execute(
+        "ALTER TABLE listings ADD COLUMN playback_policy TEXT NOT NULL DEFAULT 'open'",
+        [],
+    );
+    // TEE device manufacturers table
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS manufacturers (
+            pk_hex TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            website TEXT NOT NULL DEFAULT '',
+            registered_at TEXT NOT NULL
+        );"
+    ).expect("Failed to create manufacturers table");
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +221,7 @@ fn listing_from_row(row: &rusqlite::Row) -> rusqlite::Result<ContentListing> {
         pre_c1_hex: row.get(14)?,
         pre_c2_hex: row.get(15)?,
         pre_pk_creator_hex: row.get(16)?,
+        playback_policy: row.get(17)?,
     })
 }
 
@@ -195,7 +229,7 @@ const LISTING_COLS: &str =
     "content_hash, encrypted_hash, file_name, size_bytes, price_sats,
      chunk_size, chunk_count, plaintext_root, encrypted_root,
      creator_pubkey, creator_address, creator_ln_address, creator_alias, registered_at,
-     pre_c1_hex, pre_c2_hex, pre_pk_creator_hex";
+     pre_c1_hex, pre_c2_hex, pre_pk_creator_hex, playback_policy";
 
 /// POST /api/listings -- creator publishes a content listing
 async fn create_listing(
@@ -208,8 +242,8 @@ async fn create_listing(
          (content_hash, encrypted_hash, file_name, size_bytes, price_sats,
           chunk_size, chunk_count, plaintext_root, encrypted_root,
           creator_pubkey, creator_address, creator_ln_address, creator_alias, registered_at,
-          pre_c1_hex, pre_c2_hex, pre_pk_creator_hex)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+          pre_c1_hex, pre_c2_hex, pre_pk_creator_hex, playback_policy)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         rusqlite::params![
             listing.content_hash,
             listing.encrypted_hash,
@@ -228,6 +262,7 @@ async fn create_listing(
             listing.pre_c1_hex,
             listing.pre_c2_hex,
             listing.pre_pk_creator_hex,
+            listing.playback_policy,
         ],
     );
 
@@ -438,6 +473,108 @@ async fn delete_all_seeders(State(state): State<AppState>) -> impl IntoResponse 
 }
 
 // ---------------------------------------------------------------------------
+// Manufacturer handlers
+// ---------------------------------------------------------------------------
+
+/// POST /api/manufacturers -- register a TEE device manufacturer
+async fn create_manufacturer(
+    State(state): State<AppState>,
+    Json(mut mfr): Json<Manufacturer>,
+) -> impl IntoResponse {
+    if mfr.registered_at.is_empty() {
+        mfr.registered_at = chrono::Utc::now().to_rfc3339();
+    }
+    let db = state.db.lock().unwrap();
+    let result = db.execute(
+        "INSERT OR REPLACE INTO manufacturers (pk_hex, name, description, website, registered_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![mfr.pk_hex, mfr.name, mfr.description, mfr.website, mfr.registered_at],
+    );
+    match result {
+        Ok(_) => {
+            println!("Manufacturer registered: {} ({})", mfr.name, &mfr.pk_hex[..16]);
+            (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+        }
+        Err(e) => {
+            eprintln!("Failed to register manufacturer: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+        }
+    }
+}
+
+/// GET /api/manufacturers -- list all registered manufacturers
+async fn list_manufacturers(State(state): State<AppState>) -> impl IntoResponse {
+    let db = state.db.lock().unwrap();
+    let mut stmt = db
+        .prepare("SELECT pk_hex, name, description, website, registered_at FROM manufacturers ORDER BY registered_at DESC")
+        .unwrap();
+    let items: Vec<Manufacturer> = stmt
+        .query_map([], |row| {
+            Ok(Manufacturer {
+                pk_hex: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                website: row.get(3)?,
+                registered_at: row.get(4)?,
+            })
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    Json(serde_json::json!({ "items": items }))
+}
+
+/// GET /api/manufacturers/{pk_hex} -- get a specific manufacturer
+async fn get_manufacturer(
+    State(state): State<AppState>,
+    Path(pk_hex): Path<String>,
+) -> impl IntoResponse {
+    let db = state.db.lock().unwrap();
+    let result = db.query_row(
+        "SELECT pk_hex, name, description, website, registered_at FROM manufacturers WHERE pk_hex = ?1",
+        rusqlite::params![pk_hex],
+        |row| {
+            Ok(Manufacturer {
+                pk_hex: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                website: row.get(3)?,
+                registered_at: row.get(4)?,
+            })
+        },
+    );
+    match result {
+        Ok(mfr) => (StatusCode::OK, Json(serde_json::json!(mfr))).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Manufacturer not found"}))).into_response(),
+    }
+}
+
+/// DELETE /api/manufacturers/{pk_hex} -- deregister a manufacturer
+async fn delete_manufacturer(
+    State(state): State<AppState>,
+    Path(pk_hex): Path<String>,
+) -> impl IntoResponse {
+    let db = state.db.lock().unwrap();
+    let deleted = db
+        .execute("DELETE FROM manufacturers WHERE pk_hex = ?1", rusqlite::params![pk_hex])
+        .unwrap_or(0);
+    if deleted > 0 {
+        println!("Manufacturer deregistered: {}", &pk_hex[..16.min(pk_hex.len())]);
+        (StatusCode::OK, Json(serde_json::json!({"ok": true, "deleted": deleted})))
+    } else {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Manufacturer not found"})))
+    }
+}
+
+/// DELETE /api/manufacturers -- clear all manufacturers (test re-provisioning)
+async fn delete_all_manufacturers(State(state): State<AppState>) -> impl IntoResponse {
+    let db = state.db.lock().unwrap();
+    let deleted = db.execute("DELETE FROM manufacturers", []).unwrap_or(0);
+    println!("Cleared {} manufacturers", deleted);
+    (StatusCode::OK, Json(serde_json::json!({ "deleted": deleted })))
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard (HTML)
 // ---------------------------------------------------------------------------
 
@@ -622,6 +759,8 @@ async fn main() {
         .route("/api/search", get(search_listings))
         .route("/api/seeders", post(create_seeder).get(list_seeders).delete(delete_all_seeders))
         .route("/api/discover/{content_hash}", get(discover))
+        .route("/api/manufacturers", post(create_manufacturer).get(list_manufacturers).delete(delete_all_manufacturers))
+        .route("/api/manufacturers/{pk_hex}", get(get_manufacturer).delete(delete_manufacturer))
         .layer(cors)
         .with_state(state);
 
