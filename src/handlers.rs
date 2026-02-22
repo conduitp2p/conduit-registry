@@ -6,23 +6,71 @@ use axum::response::IntoResponse;
 use axum::Json;
 
 use crate::db::{listing_from_row, LISTING_COLS};
+use crate::signature::verify_lightning_signature;
 use crate::types::{
     AppState, ContentListing, DiscoverResponse, Manufacturer, SearchParams, SeederAnnouncement,
 };
+
+fn listing_canonical_message(
+    content_hash: &str,
+    encrypted_hash: &str,
+    encrypted_root: &str,
+    price_sats: u64,
+    creator_pubkey: &str,
+) -> String {
+    format!(
+        "conduit:listing:v1:{}:{}:{}:{}:{}",
+        content_hash, encrypted_hash, encrypted_root, price_sats, creator_pubkey
+    )
+}
 
 /// POST /api/listings -- creator publishes a content listing
 pub async fn create_listing(
     State(state): State<AppState>,
     Json(listing): Json<ContentListing>,
 ) -> impl IntoResponse {
+    // Verify creator signature (Layer 2)
+    if listing.creator_signature.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "creator_signature is required"})),
+        );
+    }
+
+    let canonical = listing_canonical_message(
+        &listing.content_hash,
+        &listing.encrypted_hash,
+        &listing.encrypted_root,
+        listing.price_sats,
+        &listing.creator_pubkey,
+    );
+
+    if !verify_lightning_signature(
+        canonical.as_bytes(),
+        &listing.creator_signature,
+        &listing.creator_pubkey,
+    ) {
+        eprintln!(
+            "Signature verification FAILED for listing {} (creator {})",
+            listing.content_hash,
+            &listing.creator_pubkey[..16.min(listing.creator_pubkey.len())]
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Invalid creator_signature: ECDSA verification failed against creator_pubkey"
+            })),
+        );
+    }
+
     let db = state.db.lock().unwrap();
     let result = db.execute(
         "INSERT OR REPLACE INTO listings
          (content_hash, encrypted_hash, file_name, size_bytes, price_sats,
           chunk_size, chunk_count, plaintext_root, encrypted_root,
           creator_pubkey, creator_address, creator_ln_address, creator_alias, registered_at,
-          pre_c1_hex, pre_c2_hex, pre_pk_creator_hex, playback_policy)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+          pre_c1_hex, pre_c2_hex, pre_pk_creator_hex, playback_policy, creator_signature)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         rusqlite::params![
             listing.content_hash,
             listing.encrypted_hash,
@@ -42,13 +90,14 @@ pub async fn create_listing(
             listing.pre_c2_hex,
             listing.pre_pk_creator_hex,
             listing.playback_policy,
+            listing.creator_signature,
         ],
     );
 
     match result {
         Ok(_) => {
             println!(
-                "Listing stored: {} ({})",
+                "Listing stored (sig verified): {} ({})",
                 listing.file_name, listing.content_hash
             );
             (StatusCode::OK, Json(serde_json::json!({"ok": true})))

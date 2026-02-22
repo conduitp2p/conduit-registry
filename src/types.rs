@@ -34,6 +34,8 @@ pub struct ContentListing {
     pub pre_pk_creator_hex: String,
     #[serde(default = "default_playback_policy")]
     pub playback_policy: String,
+    #[serde(default)]
+    pub creator_signature: String,
 }
 
 pub fn default_playback_policy() -> String {

@@ -10,6 +10,7 @@
 mod dashboard;
 mod db;
 mod handlers;
+mod signature;
 mod types;
 
 use std::sync::{Arc, Mutex};

@@ -9,8 +9,11 @@ description = "Conduit content discovery registry: centralized index standing in
 axum = "0.8"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
+hex = "0.4"
 rusqlite = "0.31"
+secp256k1 = { version = "0.29", features = ["recovery", "global-context"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
