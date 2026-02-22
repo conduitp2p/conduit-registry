@@ -21,7 +21,8 @@ pub fn init_db(conn: &Connection) {
             creator_address TEXT NOT NULL,
             creator_ln_address TEXT NOT NULL,
             creator_alias TEXT NOT NULL DEFAULT '',
-            registered_at TEXT NOT NULL
+            registered_at TEXT NOT NULL,
+            creator_signature TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS seeders (
@@ -69,6 +70,11 @@ pub fn init_db(conn: &Connection) {
         "ALTER TABLE listings ADD COLUMN playback_policy TEXT NOT NULL DEFAULT 'open'",
         [],
     );
+    // Migration: add creator_signature column (Layer 2 signed listings)
+    let _ = conn.execute(
+        "ALTER TABLE listings ADD COLUMN creator_signature TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     // TEE device manufacturers table
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS manufacturers (
@@ -101,6 +107,7 @@ pub fn listing_from_row(row: &rusqlite::Row) -> rusqlite::Result<ContentListing>
         pre_c2_hex: row.get(15)?,
         pre_pk_creator_hex: row.get(16)?,
         playback_policy: row.get(17)?,
+        creator_signature: row.get(18)?,
     })
 }
 
@@ -108,4 +115,4 @@ pub const LISTING_COLS: &str =
     "content_hash, encrypted_hash, file_name, size_bytes, price_sats,
      chunk_size, chunk_count, plaintext_root, encrypted_root,
      creator_pubkey, creator_address, creator_ln_address, creator_alias, registered_at,
-     pre_c1_hex, pre_c2_hex, pre_pk_creator_hex, playback_policy";
+     pre_c1_hex, pre_c2_hex, pre_pk_creator_hex, playback_policy, creator_signature";
